@@ -1,0 +1,57 @@
+
+services:
+  mcp_server:  # nazov sluzby beziacej v dockery (DNS meno)
+    build: ./mcp_server/
+    container_name: name_mcp_server
+    ports:
+      - "9000:9000"
+    environment:
+      - ENV="development"   
+    restart: unless-stopped
+
+  file_service:  # nazov sluzby beziacej v dockery (DNS meno)
+    build: ./file_service/
+    container_name: name_file_service
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./example_docs:/app/files
+    environment:
+      - ENV="development"
+      - ENV_FILES_PATH=/app/files  
+    user: "0:0"
+    restart: unless-stopped
+
+  postgres:  # nazov sluzby beziacej v dockery (DNS meno)
+    image: postgres:latest
+    container_name: name_postgres_finance
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sql_finance
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+  database_service:  # nazov sluzby beziacej v dockery (DNS meno)
+    build: /database_service/
+    container_name: name_database_service
+    ports:
+      - "9002:9002"
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/sql_finance
+    restart: unless-stopped
+
+  chatbot_service:  # nazov sluzby beziacej v dockery (DNS meno)
+    build: ./mcp_client/
+    container_name: name_chatbot_service
+    ports:
+      - "9003:9003"
+    depends_on:
+      - mcp_server
+    restart: unless-stopped
