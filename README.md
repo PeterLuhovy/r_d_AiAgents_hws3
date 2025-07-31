@@ -69,6 +69,7 @@ python chat.py
 ### 📊 **Faktúry - Vytvorenie**
 ```
 "Vytvor novú faktúru"
+"Vygeneruj a ulož do databázy jednu faktúru s náhodnými údajmi a potom mi ju zobraz"
 "Create new invoice"
 "Pridaj faktúru pre dodávateľa XYZ na sumu 1500€"
 "Chcem vytvoriť faktúru"

@@ -2,6 +2,7 @@ import aiohttp
 import json
 import mcp.types as types
 from typing import List
+import base64
 
 # URL file servisu v Docker sieti
 FILE_SERVICE_URL = "http://file_service:9001"
