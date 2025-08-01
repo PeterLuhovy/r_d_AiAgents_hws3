@@ -2,7 +2,6 @@ import aiohttp
 import json
 import mcp.types as types
 from typing import List
-import base64
 
 # URL file servisu v Docker sieti
 FILE_SERVICE_URL = "http://file_service:9001"
@@ -49,13 +48,16 @@ async def execute_process_pdf_file(**arguments) -> List[types.TextContent]:
                     success_text += f"📁 Premenovaný na: {raw_filename}\n"
                     success_text += f"🖼️ Formát obrázka: {format_type.upper()}\n"
                     success_text += f"📊 Veľkosť base64 dát: {len(base64_data):,} znakov\n\n"
+                    success_text += f"🖼️ Obrázok je pripravený na zobrazenie alebo analýzu.\n"
+                    success_text += f"💡 Môžete sa opýtať: 'Čo je na obrázku?' alebo 'Analyzuj obsah faktúry'"
                     
-                    if base64_data:
-                        success_text += f"🔗 Base64 obrázok (prvých 100 znakov):\n"
-                        success_text += f"{base64_data[:100]}...\n\n"
-                        success_text += f"💡 Tip: Base64 dáta môžete použiť na zobrazenie obrázka alebo ďalšie spracovanie."
+                    # ŠPECIÁLNY FORMÁT pre base64 obrázok - chatbot toto rozpozná
+                    image_content = f"IMAGE_BASE64:{format_type}:{base64_data}"
                     
-                    return [types.TextContent(type="text", text=success_text)]
+                    return [
+                        types.TextContent(type="text", text=success_text),
+                        types.TextContent(type="text", text=image_content)
+                    ]
                     
                 else:
                     error_text = await response.text()

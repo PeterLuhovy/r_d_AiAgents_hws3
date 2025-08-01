@@ -19,55 +19,92 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def extract_base64_images(text: str) -> tuple[str, list[str]]:
-    """Extract base64 images from text and return cleaned text + images"""
-    # Pattern to find base64 data (common prefixes and raw base64)
-    base64_patterns = [
-        r'data:image\/[^;]+;base64,([A-Za-z0-9+/]{100,}={0,2})',  # Standard data URL
-        r'🔗 Base64 obrázok[^:]*:\s*([A-Za-z0-9+/]{100,}={0,2})',  # MCP format
-        r'Base64[^:]*:\s*([A-Za-z0-9+/]{100,}={0,2})',  # Alternative MCP format
-        r'([A-Za-z0-9+/]{1000,}={0,2})'  # Raw base64 (long strings)
-    ]
-    
-    base64_images = []
+def extract_base64_images(text: str) -> tuple[str, list[dict]]:
+    """Extract base64 images from text and return cleaned text + image data"""
+    images = []
     cleaned_text = text
     
-    for pattern in base64_patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
+    # Pattern for our MCP format: IMAGE_BASE64:format:base64data
+    mcp_pattern = r'IMAGE_BASE64:(\w+):([A-Za-z0-9+/]+={0,2})'
+    mcp_matches = re.findall(mcp_pattern, text)
+    
+    for format_type, base64_data in mcp_matches:
+        if len(base64_data) > 100:  # Validate minimum length
+            images.append({
+                "format": format_type.lower(),
+                "data": base64_data
+            })
+            # Remove the MCP format from text
+            pattern_to_remove = f"IMAGE_BASE64:{format_type}:{base64_data}"
+            cleaned_text = cleaned_text.replace(pattern_to_remove, "[IMAGE PROCESSED]")
+            logger.info(f"📸 Found MCP image: {format_type}, size: {len(base64_data)} chars")
+    
+    # Fallback: Look for other base64 patterns
+    if not images:
+        base64_patterns = [
+            r'data:image\/([^;]+);base64,([A-Za-z0-9+/]{100,}={0,2})',  # Standard data URL
+            r'🔗 Base64 obrázok[^:]*:\s*([A-Za-z0-9+/]{1000,}={0,2})',  # Old MCP format
+            r'([A-Za-z0-9+/]{2000,}={0,2})'  # Raw base64 (very long strings)
+        ]
         
-        for match in matches:
-            # Validate it looks like base64 image data
-            if len(match) > 1000:
-                # Check for common image format headers in base64
-                if (match.startswith('/9j/') or  # JPEG
-                    match.startswith('iVBOR') or  # PNG
-                    match.startswith('R0lGOD') or  # GIF
-                    match.startswith('UklGR')):   # WebP
-                    
-                    base64_images.append(match)
-                    # Remove the base64 data from text but keep description
-                    cleaned_text = re.sub(re.escape(match), '[IMAGE]', cleaned_text)
+        for pattern in base64_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            
+            for match in matches:
+                if isinstance(match, tuple):
+                    # Standard data URL: (format, base64)
+                    format_type, base64_data = match
+                else:
+                    # Raw base64
+                    format_type = "jpeg"  # Default
+                    base64_data = match
+                
+                # Validate it looks like image data
+                if len(base64_data) > 1000:
+                    # Check for common image format headers in base64
+                    if (base64_data.startswith('/9j/') or  # JPEG
+                        base64_data.startswith('iVBOR') or  # PNG
+                        base64_data.startswith('R0lGOD') or  # GIF
+                        base64_data.startswith('UklGR')):   # WebP
+                        
+                        images.append({
+                            "format": format_type,
+                            "data": base64_data
+                        })
+                        # Remove from text
+                        cleaned_text = re.sub(re.escape(base64_data), '[IMAGE PROCESSED]', cleaned_text)
+                        logger.info(f"📸 Found fallback image: {format_type}, size: {len(base64_data)} chars")
     
-    logger.debug(f"📸 Found {len(base64_images)} base64 images in tool result")
-    if base64_images:
-        logger.debug(f"📸 First image preview: {base64_images[0][:50]}...")
-    
-    return cleaned_text, base64_images
+    logger.info(f"📸 Total images extracted: {len(images)}")
+    return cleaned_text, images
 
-def create_image_message_content(text: str, base64_images: list[str]) -> list[dict]:
+def create_image_message_content(text: str, images: list[dict]) -> list[dict]:
     """Create OpenAI message content with text and images"""
     content = [{"type": "text", "text": text}]
     
-    for base64_data in base64_images:
+    for image in images:
+        image_format = image["format"]
+        base64_data = image["data"]
+        
+        # Map format to MIME type
+        mime_type = {
+            "jpeg": "image/jpeg",
+            "jpg": "image/jpeg", 
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp"
+        }.get(image_format, "image/jpeg")
+        
         content.append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/jpeg;base64,{base64_data}",
-                "detail": "low"  # Use "low" for faster processing, "high" for more detail
+                "url": f"data:{mime_type};base64,{base64_data}",
+                "detail": "high"  # Use "high" for better analysis
             }
         })
+        
+        logger.info(f"📸 Added image to message: {mime_type}, {len(base64_data)} chars")
     
-    logger.debug(f"📸 Created message content with {len(base64_images)} images")
     return content
 
 # Request models
@@ -147,14 +184,15 @@ class MCPClient:
                 result = data.get("result", {})
                 content = result.get("content", [])
                 
-                # Extract text from content
+                # Extract text from content and combine all parts
                 text_result = ""
                 for item in content:
                     if item.get("type") == "text":
-                        text_result += item.get("text", "")
+                        text_result += item.get("text", "") + "\n"
                 
-                logger.info(f"✅ MCP tool {tool_name} result: {text_result[:100]}...")
-                return text_result
+                logger.info(f"✅ MCP tool {tool_name} result length: {len(text_result)} chars")
+                logger.debug(f"✅ MCP tool {tool_name} result preview: {text_result[:200]}...")
+                return text_result.strip()
             else:
                 logger.error(f"❌ MCP tool call failed: HTTP {response.status_code}")
                 return f"Tool error: HTTP {response.status_code}"
@@ -196,7 +234,7 @@ def should_use_tools(message: str, chat_history: List[Dict[str, str]]) -> bool:
     # Direct tool-related patterns
     invoice_patterns = ["faktúr", "faktur", "fatúr", "fatur", "invoice"]
     file_patterns = ["súbor", "subor", "file", "pdf", "zložk", "zlozk", "folder"]
-    action_patterns = ["spracuj", "vytvor", "zoznam", "show", "list", "create", "zobraz", "ukáž"]
+    action_patterns = ["spracuj", "vytvor", "zoznam", "show", "list", "create", "zobraz", "ukáž", "analyzuj"]
     
     # Check for direct tool-related words
     found_invoice = any(pattern in message_lower for pattern in invoice_patterns)
@@ -248,7 +286,7 @@ def create_tools_for_openai():
         }
         openai_tools.append(openai_tool)
     
-    logger.debug(f"🔧 Created {len(openai_tools)} OpenAI tools: {json.dumps(openai_tools, indent=2)}")
+    logger.debug(f"🔧 Created {len(openai_tools)} OpenAI tools")
     return openai_tools
 
 @app.get("/health")
@@ -288,13 +326,8 @@ async def test_api_key(request: TestAPIKeyRequest):
         "max_tokens": 10
     }
     
-    logger.debug(f"🤖 OpenAI API test request: {json.dumps(data, indent=2)}")
-    
     try:
         response = requests.post(url, headers=headers, json=data, timeout=30)
-        
-        logger.debug(f"🤖 OpenAI API test response status: {response.status_code}")
-        logger.debug(f"🤖 OpenAI API test response: {response.text}")
         
         if response.status_code == 200:
             response_data = response.json()
@@ -337,7 +370,6 @@ async def chat_endpoint(request: ChatRequest):
     
     # Get chat history
     history = get_chat_history(session_id)
-    logger.debug(f"📚 Chat history for session {session_id}: {json.dumps(history, indent=2)}")
     
     # Prepare messages for OpenAI
     messages = [{"role": "system", "content": config.system_prompt}]
@@ -367,27 +399,17 @@ async def chat_endpoint(request: ChatRequest):
         data["tool_choice"] = "auto"
         logger.info("🔧 Added MCP tools to OpenAI request")
     
-    # Log the complete request to OpenAI (without API key)
-    log_data = data.copy()
-    logger.debug(f"🤖 OpenAI API request: {json.dumps(log_data, indent=2)}")
-    
     try:
         logger.info(f"🤖 Calling OpenAI with {len(messages)} messages...")
         response = requests.post(url, headers=headers, json=data, timeout=60)
         
-        logger.debug(f"🤖 OpenAI response status: {response.status_code}")
-        logger.debug(f"🤖 OpenAI response headers: {dict(response.headers)}")
-        
         if response.status_code == 200:
             response_data = response.json()
-            logger.debug(f"🤖 OpenAI response data: {json.dumps(response_data, indent=2)}")
-            
             message = response_data["choices"][0]["message"]
             
             # Handle tool calls if present
             if message.get("tool_calls"):
                 logger.info(f"🔧 OpenAI wants to use {len(message['tool_calls'])} tools")
-                logger.debug(f"🔧 Tool calls: {json.dumps(message['tool_calls'], indent=2)}")
                 
                 # Add assistant message with tool calls to conversation
                 messages.append({
@@ -398,6 +420,8 @@ async def chat_endpoint(request: ChatRequest):
                 
                 # Execute each tool call
                 has_images = False
+                all_images = []
+                
                 for tool_call in message["tool_calls"]:
                     tool_name = tool_call["function"]["name"]
                     try:
@@ -405,36 +429,27 @@ async def chat_endpoint(request: ChatRequest):
                     except:
                         tool_args = {}
                     
-                    logger.info(f"🔧 Calling MCP tool: {tool_name} with args: {tool_args}")
+                    logger.info(f"🔧 Calling MCP tool: {tool_name}")
                     tools_used.append(tool_name)
                     
                     # Call MCP tool
                     tool_result = await mcp_client.call_tool(tool_name, tool_args)
                     
                     # Check for base64 images in tool result
-                    cleaned_result, base64_images = extract_base64_images(tool_result)
+                    cleaned_result, images = extract_base64_images(tool_result)
                     
-                    if base64_images:
-                        logger.info(f"📸 Tool {tool_name} returned {len(base64_images)} images")
+                    if images:
+                        logger.info(f"📸 Tool {tool_name} returned {len(images)} images")
                         has_images = True
+                        all_images.extend(images)
                         
-                        # Add tool result with images
+                        # Add cleaned tool result
                         tool_message = {
                             "role": "tool",
                             "tool_call_id": tool_call["id"],
                             "content": cleaned_result
                         }
                         messages.append(tool_message)
-                        
-                        # Add user message with images for OpenAI to analyze
-                        image_content = create_image_message_content(
-                            f"Analyze this image from tool {tool_name}:", 
-                            base64_images
-                        )
-                        messages.append({
-                            "role": "user",
-                            "content": image_content
-                        })
                     else:
                         # Regular tool result without images
                         tool_message = {
@@ -443,7 +458,17 @@ async def chat_endpoint(request: ChatRequest):
                             "content": tool_result
                         }
                         messages.append(tool_message)
-                        logger.debug(f"🔧 Tool result message: {json.dumps(tool_message, indent=2)}")
+                
+                # If we have images, add them to the conversation
+                if has_images:
+                    image_content = create_image_message_content(
+                        "Analyzuj obrázky, ktoré boli spracované z PDF súborov. Povedz mi čo vidíš a aké informácie môžeš extrahovať.",
+                        all_images
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": image_content
+                    })
                 
                 # Get final response from OpenAI with tool results
                 final_data = data.copy()
@@ -452,23 +477,19 @@ async def chat_endpoint(request: ChatRequest):
                 final_data.pop("tool_choice", None)
                 
                 # Use vision model if we have images
-                if has_images and config.model != "gpt-4o":
-                    final_data["model"] = "gpt-4o"  # Switch to vision-capable model
-                    logger.info("📸 Switched to gpt-4o for image analysis")
-                
-                logger.debug(f"🤖 Final OpenAI request: {json.dumps(final_data, indent=2)}")
+                if has_images:
+                    if "gpt-4o" not in final_data["model"]:
+                        final_data["model"] = "gpt-4o"  # Switch to vision-capable model
+                        logger.info(f"📸 Switched to {final_data['model']} for image analysis")
                 
                 final_response = requests.post(url, headers=headers, json=final_data, timeout=60)
                 
-                logger.debug(f"🤖 Final OpenAI response status: {final_response.status_code}")
-                
                 if final_response.status_code == 200:
                     final_response_data = final_response.json()
-                    logger.debug(f"🤖 Final OpenAI response: {json.dumps(final_response_data, indent=2)}")
                     ai_response = final_response_data["choices"][0]["message"]["content"]
                 else:
                     logger.error(f"❌ Final OpenAI call failed: HTTP {final_response.status_code}")
-                    ai_response = "Sorry, there was an error processing the tool results."
+                    ai_response = "Prepáčte, nastala chyba pri spracovaní výsledkov nástrojov."
             else:
                 ai_response = message["content"]
             
@@ -486,7 +507,6 @@ async def chat_endpoint(request: ChatRequest):
             )
         else:
             logger.error(f"❌ OpenAI error: HTTP {response.status_code}")
-            logger.error(f"❌ OpenAI error response: {response.text}")
             raise HTTPException(
                 status_code=500, 
                 detail=f"OpenAI API error: HTTP {response.status_code}"
@@ -508,7 +528,6 @@ async def reset_chat_history(request: dict):
     
     session_id = api_key[-10:]
     reset_history(session_id)
-    logger.info(f"🔄 Chat history reset for session: {session_id}")
     return {"message": "Chat history reset successfully"}
 
 if __name__ == "__main__":
